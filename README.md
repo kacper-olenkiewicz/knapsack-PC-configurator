@@ -1,1 +1,1 @@
-# knapsack-PC-configurator
+Projekt to inteligentny system rekomendacyjny, który automatycznie składa optymalny zestaw komputerowy w oparciu o zdefiniowany budżet oraz dostarczoną bazę danych podzespołów. Zamiast polegać na ręcznym przeszukiwaniu ofert, aplikacja traktuje budowę komputera jako zaawansowany wariant problemu optymalizacyjnego – Multiple-Choice Knapsack Problem (MCKP).
