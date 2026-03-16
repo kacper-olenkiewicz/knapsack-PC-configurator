@@ -7,12 +7,14 @@ def build_optimal_pc(budget: float):
         print("Brak danych do analizy.")
         return
     
+    # 1. Zabezpieczenie: Wymuszamy typ liczbowy, by sortowanie i filtry działały poprawnie!
+    df['Price_PLN'] = pd.to_numeric(df['Price_PLN'], errors='coerce')
+    df['Performance_Score'] = pd.to_numeric(df['Performance_Score'], errors='coerce')
+    
     # Usuwamy wiersze, w których "Category" jest NaN
     df = remove_nan_categories(df, column='Category')
     categories = list(df['Category'].unique())
     
-    # Aby poprawnie dysponować budżetem, musimy ustalić rezerwę na pozostałe części.
-    # W pierwszej kolejności obliczamy minimalne kwoty, jakie trzeba wydać na każdą z kategorii.
     min_prices = {}
     for cat in categories:
         min_prices[cat] = df[df['Category'] == cat]['Price_PLN'].min()
@@ -27,64 +29,80 @@ def build_optimal_pc(budget: float):
     remaining_budget = budget
     chosen_socket = None
     
-    print(f"==== Planowanie zestawu komputerowego. Całkowity budżet: {budget:.2f} PLN ====\n")
-    
-    # Sortujemy kategorie. Najpierw kupujemy najdroższe i kluczowe części, gdzie warto "wtłoczyć" jak najwięcej budżetu.
     priority_order = ['GPU', 'CPU', 'Motherboard', 'RAM', 'Storage', 'Power Supply']
-    
-    # Dodajemy ewentualne inne kategorie z bazy, o których zapomnieliśmy
     for c in categories:
         if c not in priority_order:
             priority_order.append(c)
             
-    # Filtrujemy tylko te kategorie, które rzeczywiście wystepują w naszej bazie
     ordered_categories = [c for c in priority_order if c in categories]
     
-    # Nowy, lepszy algorytm
+    # 2.Proporcje, według których rozdzielamy NADWYŻKĘ budżetu
+    weights = {
+        'GPU': 0.45,
+        'CPU': 0.25,
+        'Motherboard': 0.10,
+        'RAM': 0.08,
+        'Storage': 0.07,
+        'Power Supply': 0.05
+    }
+    
     for i, category in enumerate(ordered_categories):
         cat_df = get_components_by_category(df, category)
         
-        # Filtrujemy dane w przypadku CPU/Motherboard dla zachowania kompatybilności gniazda
         if category in ['Motherboard', 'CPU'] and chosen_socket is not None:
             cat_df = cat_df[cat_df['Socket'] == chosen_socket]
-            
-            # Aktualizacja minimalnej ceny płyty po nałożeniu ograniczenia socketu, 
-            # na wypadek gdyby ten socket wymagał nieco droższej części w koszyku
             if not cat_df.empty:
                 min_prices[category] = cat_df['Price_PLN'].min()
 
-        # Obliczamy ile mamy "bezpiecznego" budżetu dla TEJ kategorii.
-        # Od pozostałych pieniędzy odejmujemy absolutne minimum, które będziemy musieli wydać na to co zostało do kupienia
         remaining_categories = ordered_categories[i+1:]
         min_cost_of_rest = sum(min_prices.get(c, 0) for c in remaining_categories)
         
-        safe_max_spend = remaining_budget - min_cost_of_rest
+        # Obliczamy ile mamy "wolnych środków" ponad absolutne minimum na resztę części
+        current_surplus = remaining_budget - min_cost_of_rest
+        
+        # Obliczamy zbalansowany przydział z nadwyżki dla obecnej kategorii
+        current_weight = weights.get(category, 0.0)
+        remaining_weights = sum(weights.get(c, 0.0) for c in ordered_categories[i:])
+        
+        if remaining_weights > 0:
+            normalized_weight = current_weight / remaining_weights
+        else:
+            normalized_weight = 1.0 if i == len(ordered_categories) - 1 else 0.0
+            
+        category_surplus = current_surplus * normalized_weight
+        
+        # Budżet na część = jej cena minimalna + jej kawałek nadwyżki
+        allocated_budget = min_prices.get(category, 0) + category_surplus
+        
+        # Zabezpieczenie przed przekroczeniem fizycznie dostępnych pieniędzy
+        absolute_max = remaining_budget - min_cost_of_rest
+        safe_max_spend = min(allocated_budget, absolute_max)
         
         affordable_df = filter_by_max_price(cat_df, safe_max_spend)
         
+        # Ratunek: Jeśli proporcjonalny budżet jest za mały (np. przez wymogi socketu), 
+        # zezwalamy na wydanie wszystkiego co można (absolute_max)
+        if affordable_df.empty:
+            affordable_df = filter_by_max_price(cat_df, absolute_max)
+            
         if affordable_df.empty:
             print(f"[-] Nie udało się dobrać elementu z kategorii: {category} (Niewystarczający budżet np. dla socketu: {chosen_socket})")
             continue
             
-        # Zamiast patrzeć tylko na "value", sortujemy tak, aby wyciągnąć JAK NAJWYŻSZĄ WYDAJNOŚĆ w naszym wyznaczonym bezpiecznym budżecie. 
-        # Cechą drugorzędną (w przypadku remisu) jest cena - weźmiemy stąd najtańszy o danej mocnej wydajności.
+        # Wybieramy najwydajniejszą część w ustalonym, abalansowanym budżecie
         affordable_df = affordable_df.sort_values(by=['Performance_Score', 'Price_PLN'], ascending=[False, True])
         best_component = affordable_df.iloc[0]
         
         socket_val = best_component.get('Socket')
-        
-        # Oznaczmy zapisany socket dla celów kompatybilności w kolejnych iteracjach
         if pd.notna(socket_val) and str(socket_val).strip() != '' and str(socket_val).lower() != 'nan':
             if chosen_socket is None and category in ['Motherboard', 'CPU']:
                 chosen_socket = socket_val
         
-        # Aktualizacja portfela i koszyka
         selected_components.append(best_component)
         price = best_component['Price_PLN']
         remaining_budget -= price
         total_spent += price
         
-        # Czysty format wyświetlania złącza, pozbywający się "nan"
         display_socket = str(socket_val) if pd.notna(socket_val) and str(socket_val).lower() != 'nan' else 'Brak'
         
         print(f"[+] Dobrano {category}: {best_component['Name']}")
@@ -95,5 +113,8 @@ def build_optimal_pc(budget: float):
     print(f"Wolne środki: {remaining_budget:.2f} PLN.")
 
 if __name__ == '__main__':
-    # Przykładowe wywołanie z budżetem 5000 zł
-    build_optimal_pc(budget=5000.0)
+    try:
+        a = float(input("Podaj budżet: "))
+        build_optimal_pc(budget=a)
+    except ValueError:
+        print("Błąd: Podana wartość nie jest poprawną liczbą!")
