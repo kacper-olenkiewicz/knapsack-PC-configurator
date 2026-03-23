@@ -46,17 +46,14 @@ def get_pareto_front(state_list):
         
     return result
 
-def build_optimal_pc_knapsack(budget: float):
+def build_optimal_pc_knapsack(budget: float, max_states: int = -1):
     df = load_data('dataset.csv')
     if df.empty:
         print("Brak danych do analizy.")
         return
         
-    df['Price_PLN'] = pd.to_numeric(df['Price_PLN'], errors='coerce')
-    df['Performance_Score'] = pd.to_numeric(df['Performance_Score'], errors='coerce')
-    df['TDP_W'] = pd.to_numeric(df['TDP_W'], errors='coerce').fillna(0)
-    df['Power_W'] = pd.to_numeric(df['Power_W'], errors='coerce').fillna(0)
-    df = df.dropna(subset=['Category', 'Price_PLN', 'Performance_Score'])
+    df[['Price_PLN', 'Performance_Score', 'TDP_W', 'Power_W']] = df[['Price_PLN', 'Performance_Score', 'TDP_W', 'Power_W']].apply(pd.to_numeric, errors='coerce')
+    df = df.fillna({'TDP_W': 0, 'Power_W': 0}).dropna(subset=['Category', 'Price_PLN', 'Performance_Score'])
     
     states = [(0.0, 0.0, (), (None, None, 0.0))]
     
@@ -70,10 +67,17 @@ def build_optimal_pc_knapsack(budget: float):
     ]
     
     # Pre-konwersja do słowników Pythona - operacje na DF bezpośrednio w pętli powodowały powolne działanie
-    category_items = {}
-    for cat_name, step_id in category_order:
-        cat_df = df[df['Category'] == cat_name]
-        category_items[step_id] = cat_df.to_dict('records')
+    category_items = {step_id: df[df['Category'] == cat_name].to_dict('records') for cat_name, step_id in category_order}
+        
+    # OPTYMALIZACJA: Branch & Bound (Przewidywanie minimalnych kosztów reszty)
+    # Obliczamy minimalny koszt wymagany do ukończenia komputera dla każdego kroku
+    min_cost_suffix = {}
+    accumulated_min = 0
+    for cat_name, step_id in reversed(category_order):
+        min_cost_suffix[step_id] = accumulated_min
+        items = category_items.get(step_id, [])
+        if items:
+            accumulated_min += min(item['Price_PLN'] for item in items)
     
     for cat_name, step_id in category_order:
         items_list = category_items.get(step_id, [])
@@ -96,13 +100,11 @@ def build_optimal_pc_knapsack(budget: float):
                 if step_id == 'PSU' and item.get('Power_W', 0) < (tdp_req + 50):
                     continue
                     
-                item_cost = item['Price_PLN']
-                new_cost = curr_cost + item_cost
-                
-                # Budżet
-                if new_cost > budget:
+                # Budżet + minimalny koszt pozostałych podzespołów (Branch & Bound)
+                if curr_cost + item['Price_PLN'] + min_cost_suffix[step_id] > budget:
                     continue
                     
+                new_cost = curr_cost + item['Price_PLN']
                 new_perf = curr_perf + item['Performance_Score']
                 new_items_tuple = curr_items + (item,)
                 
@@ -128,6 +130,17 @@ def build_optimal_pc_knapsack(budget: float):
             return
             
         states = get_pareto_front(new_states)
+        
+        # Ograniczenie liczby stanów (Beam Search z rozkładem)
+        if max_states > 0 and len(states) > max_states:
+            # Sortujemy rosnąco po kosztach
+            states.sort(key=lambda x: x[0])
+            
+            # Pobieramy równomiernie rozłożone stany (od najtańszych do najdroższych), 
+            # żeby nie wyciąć tanich zestawów, które są niezbędne, by później starczyło budżetu na drogie GPU.
+            step = len(states) / max_states
+            states = [states[int(i * step)] for i in range(max_states)]
+            
         print(f"[{cat_name}] Konfiguracji po optymalizacji: {len(states)}")
         
     best_state = max(states, key=lambda x: x[1])
@@ -157,6 +170,9 @@ def build_optimal_pc_knapsack(budget: float):
 if __name__ == '__main__':
     try:
         a = float(input("Podaj budżet: "))
-        build_optimal_pc_knapsack(budget=a)
+        limit_input = input("Podaj max liczbę zapisanych stanów na iterację (np. 1000, Enter = brak limitu): ")
+        max_s = int(limit_input) if limit_input.strip() else -1
+        
+        build_optimal_pc_knapsack(budget=a, max_states=max_s)
     except ValueError:
         print("Błąd: Podana wartość nie jest poprawną liczbą!")
